@@ -166,7 +166,6 @@ Resources:
     LaunchConfiguration:
         Type: AWS::AutoScaling::LaunchConfiguration
         Properties:
-            KeyName: pmaddox@amazon.com
             ImageId:  !FindInMap [AWSRegionToAMI, !Ref "AWS::Region", AMI]
             InstanceType: !Ref InstanceType
             IamInstanceProfile: !Ref InstanceProfile
