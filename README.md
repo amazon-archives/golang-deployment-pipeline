@@ -17,11 +17,11 @@ This pipeline allows you easily apply [continuous delivery](https://aws.amazon.c
 
 ## Table of Contents
 
-* [What's in the box?](#whats-in-the-box)
+* [What's in the box?](#what's-in-the-box?)
  * [Source Control](#source-control)
  * [Build / Test](#build--test)
  * [Infrastructure-as-Code](#infrastructure-as-code)
- * [Zero Downtime Application Deployment](#zero-downtime-application-deployment-stagingproduction)
+ * [Zero Downtime Application Deployment](#zero--downtime-application-deployment-staging-production)
  * [Per Environment Configuration](#per-environment-configuration)
  * [Optional manual gate for Production](#optional-manual-gate-before-production)
 * [How do I deploy this?](#how-do-i-deploy-this)

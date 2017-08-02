@@ -1,0 +1,488 @@
+Description: >
+
+    (SO0024i) - Infrastructure - Deployment Pipeline for Go Applications on AWS - AWS CloudFormation Template for
+    AWS Solutions Builder Deployment Pipeline for Go Applications on AWS - **WARNING** This template
+    creates AWS resources. You will be billed for the AWS resources used if you create
+    a stack from this template.
+    Example Infrastructure for a Go Application.
+    This template will deploy a highly available Auto Scaling Group of EC2 instances with the CodeDeploy
+    agent installed ready for application deployments. It will also deploy a VPC with public and private 
+    subnets. An Application Load Balancer is placed in the public subnets, which forwards traffic to the
+    application servers in the private subnets. NAT Gateways are deployed in each AZ to facilitate outbound
+    traffic from the application servers to the internet.
+
+Parameters:
+
+    # The following parameters are set dynamically by AWS CodePipeline 
+
+    ApplicationName:
+        Type: String
+
+    EnvironmentName:
+        Type: String
+
+    ArtifactS3Bucket:
+        Type: String
+
+    # All parameters below can be overridden on a per environment basis in config/*
+
+    InstanceType:
+        Description: The instance type to deploy to
+        Type: String
+        Default: t2.micro
+
+    InstanceCount: 
+        Description: How many instances should the AutoScaling Group contain
+        Type: Number
+        Default: 2
+
+    DeploymentStrategy:
+        Description: The CodeDeploy deployment strategy to user
+        Type: String
+        Default: CodeDeployDefault.OneAtATime
+
+    VpcCIDR: 
+        Description: Please enter the IP range (CIDR notation) for this VPC
+        Type: String
+        Default: 10.192.0.0/16
+
+    PublicSubnet1CIDR:
+        Description: Please enter the IP range (CIDR notation) for the public subnet in the first Availability Zone
+        Type: String
+        Default: 10.192.10.0/24
+
+    PublicSubnet2CIDR:
+        Description: Please enter the IP range (CIDR notation) for the public subnet in the second Availability Zone
+        Type: String
+        Default: 10.192.11.0/24
+
+    PrivateSubnet1CIDR:
+        Description: Please enter the IP range (CIDR notation) for the private subnet in the first Availability Zone
+        Type: String
+        Default: 10.192.20.0/24
+
+    PrivateSubnet2CIDR:
+        Description: Please enter the IP range (CIDR notation) for the private subnet in the second Availability Zone
+        Type: String
+        Default: 10.192.21.0/24
+
+Mappings: 
+
+    # Amazon Linux AMI 2016.09.1, released on 2016-12-22
+    # https://aws.amazon.com/amazon-linux-ami/
+
+    AWSRegionToAMI:
+        us-east-1:
+            AMI: ami-9be6f38c
+        us-east-2:
+            AMI: ami-38cd975d
+        us-west-1:
+            AMI: ami-1e299d7e
+        us-west-2:
+            AMI: ami-b73d6cd7
+        ca-central-1:
+            AMI: ami-eb20928f
+        eu-west-1:
+            AMI: ami-c51e3eb6
+        eu-west-2:
+            AMI: ami-bfe0eadb
+        eu-central-1:
+            AMI: ami-211ada4e
+        ap-southeast-1:
+            AMI: ami-4dd6782e
+        ap-northeast-2:
+            AMI: ami-94bb6dfa
+        ap-northeast-1:
+            AMI: ami-9f0c67f8
+        ap-southeast-2:
+            AMI: ami-28cff44b
+        ap-south-1:
+            AMI: ami-9fc7b0f0
+        sa-east-1:
+            AMI: ami-bb40d8d7
+    
+    # CodeDeploy installer bucket list sourced from:
+    # http://docs.aws.amazon.com/codedeploy/latest/userguide/how-to-set-up-new-instance.html
+    
+    CodeDeployInstallerBuckets:
+        us-east-1:
+            Bucket: aws-codedeploy-us-east-1
+        us-east-2:
+            Bucket: aws-codedeploy-us-east-2
+        us-west-1:
+            Bucket: aws-codedeploy-us-west-1
+        us-west-2:
+            Bucket: aws-codedeploy-us-west-2
+        ca-central-1:
+            Bucket: aws-codedeploy-ca-central-1
+        eu-west-1:
+            Bucket: aws-codedeploy-eu-west-1
+        eu-west-2:
+            Bucket: aws-codedeploy-eu-west-2
+        eu-central-1:
+            Bucket: aws-codedeploy-eu-central-1
+        ap-northeast-1:
+            Bucket: aws-codedeploy-ap-northeast-1
+        ap-northeast-2:
+            Bucket: aws-codedeploy-ap-northeast-2
+        ap-southeast-1:
+            Bucket: aws-codedeploy-ap-southeast-1
+        ap-southeast-2:
+            Bucket: aws-codedeploy-ap-southeast-2
+        ap-south-1:
+            Bucket: aws-codedeploy-ap-south-1
+        sa-east-1:
+            Bucket: aws-codedeploy-sa-east-1
+
+
+Resources:
+
+    ###########################################
+    # AutoScaling Group
+    ###########################################
+
+    AutoScalingGroup:
+        Type: AWS::AutoScaling::AutoScalingGroup
+        Properties: 
+            VPCZoneIdentifier: 
+                - !Ref PrivateSubnet1
+                - !Ref PrivateSubnet2 
+            LaunchConfigurationName: !Ref LaunchConfiguration
+            TargetGroupARNs: 
+                - !Ref TargetGroup
+            MinSize: !Ref InstanceCount
+            MaxSize: !Ref InstanceCount
+            DesiredCapacity: !Ref InstanceCount
+            Tags: 
+                - Key: Name
+                  Value: !Sub ${ApplicationName}-${EnvironmentName}
+                  PropagateAtLaunch: true
+        CreationPolicy:
+            ResourceSignal: 
+                Timeout: PT15M
+        UpdatePolicy:
+            AutoScalingRollingUpdate:
+                MinInstancesInService: 1
+                MaxBatchSize: 1
+                PauseTime: PT15M
+                WaitOnResourceSignals: true
+        
+    LaunchConfiguration:
+        Type: AWS::AutoScaling::LaunchConfiguration
+        Properties:
+            ImageId:  !FindInMap [AWSRegionToAMI, !Ref "AWS::Region", AMI]
+            InstanceType: !Ref InstanceType
+            IamInstanceProfile: !Ref InstanceProfile
+            SecurityGroups: 
+                - !Ref ApplicationSecurityGroup
+            UserData: !
+                "Fn::Base64": !Sub 
+                    - |+
+                        #!/bin/bash
+
+                        # Set up a CloudFormation wait signal, so we can notify when the CodeDeploy agent is running
+                        yum install -y aws-cfn-bootstrap
+                        /opt/aws/bin/cfn-init -v --region ${AWS::Region} --stack ${AWS::StackName} --resource LaunchConfiguration
+                        
+                        # Install CodeDeploy agent
+                        yum -y update
+                        yum install -y ruby
+                        cd /home/ec2-user
+                        curl -O https://${InstallerBucket}.s3.amazonaws.com/latest/install
+                        chmod +x ./install
+                        ./install auto
+
+                        # Send a success/failure signal to CloudFormation based on the exit status of the last command
+                        /opt/aws/bin/cfn-signal -e $? --region ${AWS::Region} --stack ${AWS::StackName} --resource AutoScalingGroup
+                    - InstallerBucket:
+                        Fn::FindInMap: [ CodeDeployInstallerBuckets, !Ref "AWS::Region", Bucket]
+
+    ###########################################
+    # Load Balancer
+    ###########################################
+
+    LoadBalancer:
+        Type: AWS::ElasticLoadBalancingV2::LoadBalancer
+        Properties:
+            Name: !Sub ${ApplicationName}-${EnvironmentName}
+            Subnets: 
+                - !Ref PublicSubnet1
+                - !Ref PublicSubnet2
+            SecurityGroups: 
+                - !Ref LoadBalancerSecurityGroup
+            Tags: 
+                - Key: Name
+                  Value: !Sub ${ApplicationName}-${EnvironmentName}
+
+    LoadBalancerListener:
+        Type: AWS::ElasticLoadBalancingV2::Listener
+        Properties:
+            LoadBalancerArn: !Ref LoadBalancer
+            Port: 80
+            Protocol: HTTP 
+            DefaultActions: 
+                - Type: forward
+                  TargetGroupArn: !Ref TargetGroup
+
+    TargetGroup:
+        Type: AWS::ElasticLoadBalancingV2::TargetGroup
+        Properties:
+            Name: !Sub ${ApplicationName}-${EnvironmentName}
+            VpcId: !Ref VPC
+            Port: 8000
+            Protocol: HTTP
+
+    ###########################################
+    # CodeDeploy
+    ###########################################
+
+    CodeDeployDeploymentGroup:
+        Type: AWS::CodeDeploy::DeploymentGroup
+        Properties:
+            DeploymentGroupName: !Ref EnvironmentName
+            DeploymentConfigName: !Ref DeploymentStrategy
+            ServiceRoleArn: 
+                Fn::ImportValue:
+                    !Sub CodeDeployServiceRoleArn-${ApplicationName}
+            ApplicationName: 
+                Fn::ImportValue:
+                    !Sub CodeDeployApplication-${ApplicationName} 
+            AutoScalingGroups:
+                - !Ref AutoScalingGroup
+    
+    ###########################################
+    # Security Groups
+    ###########################################
+    
+    ApplicationSecurityGroup:
+        Type: AWS::EC2::SecurityGroup
+        Properties: 
+            VpcId: !Ref VPC
+            GroupDescription: Controls who can access the application servers
+            SecurityGroupIngress:
+                # Only allow in bound from the load balancer
+                - SourceSecurityGroupId: !Ref LoadBalancerSecurityGroup 
+                  IpProtocol: -1
+            Tags: 
+                - Key: Name
+                  Value: !Sub ${ApplicationName}-${EnvironmentName}-ApplicationServers
+
+    LoadBalancerSecurityGroup:
+        Type: AWS::EC2::SecurityGroup
+        Properties: 
+            VpcId: !Ref VPC
+            GroupDescription: Controls who can access the load balancer
+            SecurityGroupIngress:
+                # Allow access from anywhere
+                - CidrIp: 0.0.0.0/0
+                  IpProtocol: -1
+            Tags: 
+                - Key: Name
+                  Value: !Sub ${ApplicationName}-${EnvironmentName}-LoadBalancers
+
+    ###########################################
+    # IAM
+    ###########################################
+
+    InstanceRole:
+        Type: AWS::IAM::Role
+        Properties: 
+            Path: /
+            RoleName: !Sub ${ApplicationName}-${EnvironmentName}-${AWS::Region}
+            AssumeRolePolicyDocument: |
+                {
+                    "Statement": [{
+                        "Action": "sts:AssumeRole",
+                        "Effect": "Allow",
+                        "Principal": { 
+                            "Service": "ec2.amazonaws.com" 
+                        }
+                    }]
+                }
+            Policies: 
+                - PolicyName: !Sub ${ApplicationName}-${EnvironmentName}-${AWS::Region}
+                  PolicyDocument: !Sub |
+                    {
+                        "Statement": [{
+                            "Effect": "Allow",
+                            "Action": [
+                                "s3:Get*"
+                            ],
+                            "Resource": [ "arn:aws:s3:::${ArtifactS3Bucket}/${ApplicationName}/*" ]
+                        }]
+                    }
+
+    InstanceProfile: 
+        Type: AWS::IAM::InstanceProfile
+        Properties:
+            Path: /
+            Roles: 
+                - !Ref InstanceRole
+    
+    ###########################################
+    # VPC, Subnets, IGW, Routes, NAT etc
+    ###########################################
+
+    VPC: 
+        Type: AWS::EC2::VPC
+        Properties:
+            CidrBlock: !Ref VpcCIDR
+            Tags: 
+                - Key: Name 
+                  Value: !Sub ${ApplicationName}-${EnvironmentName}
+            
+    InternetGateway:
+        Type: AWS::EC2::InternetGateway
+        Properties:
+            Tags:
+                - Key: Name
+                  Value: !Sub $!Sub ${ApplicationName}-${EnvironmentName}
+            
+    InternetGatewayAttachment:
+        Type: AWS::EC2::VPCGatewayAttachment
+        Properties:
+            InternetGatewayId: !Ref InternetGateway
+            VpcId: !Ref VPC
+
+    PublicSubnet1: 
+        Type: AWS::EC2::Subnet
+        Properties:
+            VpcId: !Ref VPC
+            AvailabilityZone: !Select [ 0, !GetAZs ]
+            CidrBlock: !Ref PublicSubnet1CIDR
+            MapPublicIpOnLaunch: true
+            Tags: 
+                - Key: Name 
+                  Value: !Sub ${ApplicationName} ${EnvironmentName} Public Subnet (AZ1)
+
+    PublicSubnet2: 
+        Type: AWS::EC2::Subnet
+        Properties:
+            VpcId: !Ref VPC
+            AvailabilityZone: !Select [ 1, !GetAZs ]
+            CidrBlock: !Ref PublicSubnet2CIDR
+            MapPublicIpOnLaunch: true
+            Tags: 
+                - Key: Name 
+                  Value: !Sub ${ApplicationName} ${EnvironmentName} Public Subnet (AZ2)
+
+    PrivateSubnet1: 
+        Type: AWS::EC2::Subnet
+        Properties:
+            VpcId: !Ref VPC
+            AvailabilityZone: !Select [ 0, !GetAZs ]
+            CidrBlock: !Ref PrivateSubnet1CIDR
+            MapPublicIpOnLaunch: false
+            Tags: 
+                - Key: Name 
+                  Value: !Sub ${ApplicationName} ${EnvironmentName} Private Subnet (AZ1)
+
+    PrivateSubnet2: 
+        Type: AWS::EC2::Subnet
+        Properties:
+            VpcId: !Ref VPC
+            AvailabilityZone: !Select [ 1, !GetAZs ]
+            CidrBlock: !Ref PrivateSubnet2CIDR
+            MapPublicIpOnLaunch: false
+            Tags: 
+                - Key: Name 
+                  Value: !Sub ${ApplicationName} ${EnvironmentName} Private Subnet (AZ2)
+
+    NatGateway1EIP:
+        Type: AWS::EC2::EIP
+        DependsOn: InternetGatewayAttachment
+        Properties: 
+            Domain: vpc
+
+    NatGateway2EIP:
+        Type: AWS::EC2::EIP
+        DependsOn: InternetGatewayAttachment
+        Properties:
+            Domain: vpc
+
+    NatGateway1: 
+        Type: AWS::EC2::NatGateway
+        Properties: 
+            AllocationId: !GetAtt NatGateway1EIP.AllocationId
+            SubnetId: !Ref PublicSubnet1
+
+    NatGateway2: 
+        Type: AWS::EC2::NatGateway
+        Properties:
+            AllocationId: !GetAtt NatGateway2EIP.AllocationId
+            SubnetId: !Ref PublicSubnet2
+
+    PublicRouteTable:
+        Type: AWS::EC2::RouteTable
+        Properties: 
+            VpcId: !Ref VPC
+            Tags: 
+                - Key: Name 
+                  Value: !Sub ${ApplicationName} ${EnvironmentName} Public Routes
+
+    DefaultPublicRoute: 
+        Type: AWS::EC2::Route
+        Properties: 
+            RouteTableId: !Ref PublicRouteTable
+            DestinationCidrBlock: 0.0.0.0/0
+            GatewayId: !Ref InternetGateway
+
+    PublicSubnet1RouteTableAssociation:
+        Type: AWS::EC2::SubnetRouteTableAssociation
+        Properties:
+            RouteTableId: !Ref PublicRouteTable
+            SubnetId: !Ref PublicSubnet1
+
+    PublicSubnet2RouteTableAssociation:
+        Type: AWS::EC2::SubnetRouteTableAssociation
+        Properties:
+            RouteTableId: !Ref PublicRouteTable
+            SubnetId: !Ref PublicSubnet2
+    
+    PrivateRouteTable1:
+        Type: AWS::EC2::RouteTable
+        Properties: 
+            VpcId: !Ref VPC
+            Tags: 
+                - Key: Name 
+                  Value: !Sub ${ApplicationName} ${EnvironmentName} Private Routes (AZ1)
+
+    DefaultPrivateRoute1:
+        Type: AWS::EC2::Route
+        Properties:
+            RouteTableId: !Ref PrivateRouteTable1
+            DestinationCidrBlock: 0.0.0.0/0
+            NatGatewayId: !Ref NatGateway1
+
+    PrivateSubnet1RouteTableAssociation:
+        Type: AWS::EC2::SubnetRouteTableAssociation
+        Properties:
+            RouteTableId: !Ref PrivateRouteTable1
+            SubnetId: !Ref PrivateSubnet1
+
+    PrivateRouteTable2:
+        Type: AWS::EC2::RouteTable
+        Properties: 
+            VpcId: !Ref VPC
+            Tags: 
+                - Key: Name 
+                  Value: !Sub ${ApplicationName} ${EnvironmentName} Private Routes (AZ2)
+
+    DefaultPrivateRoute2:
+        Type: AWS::EC2::Route
+        Properties:
+            RouteTableId: !Ref PrivateRouteTable2
+            DestinationCidrBlock: 0.0.0.0/0
+            NatGatewayId: !Ref NatGateway2
+
+    PrivateSubnet2RouteTableAssociation:
+        Type: AWS::EC2::SubnetRouteTableAssociation
+        Properties:
+            RouteTableId: !Ref PrivateRouteTable2
+            SubnetId: !Ref PrivateSubnet2
+
+Outputs: 
+
+    WebsiteURL: 
+        Description: Webserver URL
+        Value: !Sub http://${LoadBalancer.DNSName}/version 
