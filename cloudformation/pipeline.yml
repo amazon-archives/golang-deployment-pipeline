@@ -201,7 +201,6 @@ Resources:
                                 ApplicationName: !Ref ApplicationName
                                 DeploymentGroupName: production
                         
-
     CodeBuild:
         Type: AWS::CodeBuild::Project
         Properties:
@@ -212,7 +211,7 @@ Resources:
                 Type: CODEPIPELINE
             Environment:
                 ComputeType: BUILD_GENERAL1_SMALL
-                Image: aws/codebuild/golang:1.7.3
+                Image: aws/codebuild/golang:1.10
                 Type: LINUX_CONTAINER
                 EnvironmentVariables:
                     - 
