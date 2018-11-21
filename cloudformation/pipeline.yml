@@ -13,26 +13,28 @@ Parameters:
         Type: String
         AllowedPattern: '[A-Za-z0-9-]+'
     
-    ArtifactS3Bucket:
-        Description: An existing S3 bucket within this AWS account
+    Branch:
+        Description: 'Git branch to pull.'
+        Type: String
+        Default: ''
+
+    ApiSecret:
+        Description: 'Reqired. WebHook secrets for use with GitHub Enterprise and GitLab. Cannot contain: , \ ""'
+        Type: String
+        NoEcho: 'true'
+
+    GitUrl:
+        Description: 'URL for git pull'
         Type: String
 
-    GitHubOAuthToken: 
-        Description: Create a token with 'repo' and 'admin:repo_hook' permissions here https://github.com/settings/tokens
-        Type: String
+    GitPullLambdaSubnet:
+        Description: The subnet that the git pull Lambda function will be deployed in. This should be a private subnet with a NAT gateway and your source control should be accessible from this subnet.
+        Type: 'AWS::EC2::Subnet::Id'
 
-    GitHubUser:
-        Description: Enter GitHub username of the repository owner
-        Type: String
-
-    GitHubRepository:
-        Description: Enter the repository name that should be monitored for changes
-        Type: String
-
-    GitHubBranch:
-        Description: Enter the GitHub branch to monitored
-        Type: String
-        Default: master
+    GitPullLambdaVpc:
+        Description: The VPC you want to deploy the Git Pull lambda function into.
+        Type: 'AWS::EC2::VPC::Id'
+        Default: ''
 
 Metadata:
 
@@ -43,31 +45,81 @@ Metadata:
                     default: Application Configuration
                 Parameters:
                     - ApplicationName
-                    - ArtifactS3Bucket
             - 
                 Label:
-                    default: GitHub Configuration
+                    default: Git Configuration
                 Parameters:
-                    - GitHubOAuthToken
-                    - GitHubUser
-                    - GitHubRepository
-                    - GitHubBranch
-            
-        ParameterLabels:
-            ApplicationName: 
-                default: Application Name
-            ArtifactS3Bucket: 
-                default: CodePipeline S3 Bucket
-            GitHubRepository: 
-                default: Repository Name
-            GitHubUser: 
-                default: Repository Owner
-            GitHubBranch: 
-                default: Repository Branch
-            GitHubOAuthToken: 
-                default: OAuth2 Token
+                    - GitUrl
+                    - Branch
+                    - ApiSecret
+
+Mappings:
+    LambdaBuckets:
+        us-east-1:
+            Name: custom-source-action-blog-us-east-1
+        us-west-2:
+            Name: custom-source-action-blog-us-west-2
+        eu-west-1:
+            Name: custom-source-action-blog-eu-west-1
+
+    Constants:
+        CustomSourceAction:
+            SourceActionProvider: CustomWebhookSourceAction
+            SourceActionVersion: 100
 
 Resources:
+
+
+    ArtifactS3Bucket:
+        Type: 'AWS::S3::Bucket'
+        Properties:
+            Tags: []
+
+    CustomSourceAction:
+        Type: AWS::CodePipeline::CustomActionType
+        Properties:
+            Category: Source
+            Settings:
+                EntityUrlTemplate: !Ref GitUrl
+            ConfigurationProperties:
+                - 
+                    Name: Branch
+                    Required: true
+                    Key: false
+                    Secret: false
+                    Queryable: false 
+                    Description: 'Git branch to pull.'
+                    Type: String
+                - 
+                    Name: GitUrl
+                    Required: true
+                    Key: false
+                    Secret: false
+                    Queryable: false 
+                    Description: 'SSH git clone URL.'
+                    Type: String
+                - 
+                    Name: KeyBucket
+                    Required: true
+                    Key: false
+                    Secret: false
+                    Queryable: false 
+                    Description: 'Name of the bucket to store keys in.'
+                    Type: String
+            InputArtifactDetails:
+                MaximumCount: 0
+                MinimumCount: 0
+            OutputArtifactDetails:
+                MaximumCount: 1
+                MinimumCount: 1
+            Provider: !FindInMap 
+                        - Constants
+                        - CustomSourceAction
+                        - SourceActionProvider
+            Version: !FindInMap 
+                        - Constants
+                        - CustomSourceAction
+                        - SourceActionVersion
 
     CodePipeline:
         Type: AWS::CodePipeline::Pipeline
@@ -82,19 +134,24 @@ Resources:
                     Name: Source
                     Actions:
                         -
-                            Name: GitHub
-                            ActionTypeId:
+                            Name: Git Pull
+                            ActionTypId:
                                 Category: Source
-                                Owner: ThirdParty
-                                Version: 1
-                                Provider: GitHub
+                                Owner: Custom
+                                Version: !FindInMap 
+                                            - Constants
+                                            - CustomSourceAction
+                                            - SourceActionVersion
+                                Provider: !FindInMap 
+                                            - Constants
+                                            - CustomSourceAction
+                                            - SourceActionProvider
                             OutputArtifacts:
                                 -  Name: Source
                             Configuration:
-                                Owner: !Ref GitHubUser
-                                Repo: !Ref GitHubRepository
-                                Branch: !Ref GitHubBranch
-                                OAuthToken: !Ref GitHubOAuthToken
+                                Branch: !Ref Branch
+                                GitUrl: !Ref GitUrl
+                                KeyBucket: !Ref KeyBucket
                 -
                     Name: Build
                     Actions:
@@ -150,7 +207,7 @@ Resources:
                             Configuration: 
                                 ApplicationName: !Ref ApplicationName
                                 DeploymentGroupName: staging
-                - 
+                -
                     Name: Approvals
                     Actions:
                         - 
@@ -160,7 +217,6 @@ Resources:
                                 Owner: AWS
                                 Version: 1
                                 Provider: Manual
-                                
                 -
                     Name: Production
                     Actions:
@@ -415,22 +471,423 @@ Resources:
                             ]
                         }
 
+    KeyBucket:
+        Type: 'AWS::S3::Bucket'
+        Properties:
+            Tags: []
+
+    OutputBucket:
+        Type: 'AWS::S3::Bucket'
+        Properties:
+            VersioningConfiguration:
+                Status: Enabled
+            Tags: []
+
+    KMSKey:
+        Type: 'AWS::KMS::Key'
+        Properties:
+            Description: 'git CodePipeline integration, bucket to store ssh keys'
+            KeyPolicy:
+                Version: 2012-10-17
+                Statement:
+                    - 
+                        Sid: Allow access for Key Administrators
+                        Effect: Allow
+                        Principal:
+                            AWS:
+                                - !Join 
+                                    - ''
+                                    - 
+                                        - 'arn:aws:iam::'
+                                        - !Ref 'AWS::AccountId'
+                                        - ':root'
+                        Action:
+                            - 'kms:Create*'
+                            - 'kms:Describe*'
+                            - 'kms:Enable*'
+                            - 'kms:List*'
+                            - 'kms:Put*'
+                            - 'kms:Update*'
+                            - 'kms:Revoke*'
+                            - 'kms:Disable*'
+                            - 'kms:Get*'
+                            - 'kms:Delete*'
+                            - 'kms:ScheduleKeyDeletion'
+                            - 'kms:CancelKeyDeletion'
+                        Resource: '*'
+                    - 
+                        Sid: Allow use of the key
+                        Effect: Allow
+                        Principal:
+                            AWS:
+                                - !Join 
+                                    - ''
+                                    - 
+                                        - 'arn:aws:iam::'
+                                        - !Ref 'AWS::AccountId'
+                                        - ':root'
+                        Action:
+                            - 'kms:Encrypt'
+                            - 'kms:Decrypt'
+                            - 'kms:ReEncrypt*'
+                            - 'kms:GenerateDataKey*'
+                            - 'kms:DescribeKey'
+                        Resource: '*'
+                    - 
+                        Sid: Allow attachment of persistent resources
+                        Effect: Allow
+                        Principal:
+                            AWS:
+                                - !Join 
+                                    - ''
+                                    - 
+                                        - 'arn:aws:iam::'
+                                        - !Ref 'AWS::AccountId'
+                                        - ':root'
+                        Action:
+                            - 'kms:CreateGrant'
+                            - 'kms:ListGrants'
+                            - 'kms:RevokeGrant'
+                        Resource: '*'
+                        Condition:
+                            Bool:
+                                'kms:GrantIsForAWSResource': true
+
+    KMSKey:
+        Type: 'AWS::KMS::Key'
+        Properties:
+            Description: 'git CodePipeline integration, bucket to store ssh keys'
+            KeyPolicy:
+                Version: 2012-10-17
+                Statement:
+                    - 
+                        Sid: Allow access for Key Administrators
+                        Effect: Allow
+                        Principal:
+                            AWS:
+                                - !Join 
+                                    - ''
+                                    - 
+                                        - 'arn:aws:iam::'
+                                        - !Ref 'AWS::AccountId'
+                                        - ':root'
+                        Action:
+                            - 'kms:Create*'
+                            - 'kms:Describe*'
+                            - 'kms:Enable*'
+                            - 'kms:List*'
+                            - 'kms:Put*'
+                            - 'kms:Update*'
+                            - 'kms:Revoke*'
+                            - 'kms:Disable*'
+                            - 'kms:Get*'
+                            - 'kms:Delete*'
+                            - 'kms:ScheduleKeyDeletion'
+                            - 'kms:CancelKeyDeletion'
+                        Resource: '*'
+                    - 
+                        Sid: Allow use of the key
+                        Effect: Allow
+                        Principal:
+                            AWS:
+                                - !Join 
+                                    - ''
+                                    - 
+                                        - 'arn:aws:iam::'
+                                        - !Ref 'AWS::AccountId'
+                                        - ':root'
+                        Action:
+                            - 'kms:Encrypt'
+                            - 'kms:Decrypt'
+                            - 'kms:ReEncrypt*'
+                            - 'kms:GenerateDataKey*'
+                            - 'kms:DescribeKey'
+                        Resource: '*'
+                    - 
+                        Sid: Allow attachment of persistent resources
+                        Effect: Allow
+                        Principal:
+                            AWS:
+                                - !Join 
+                                    - ''
+                                    - 
+                                        - 'arn:aws:iam::'
+                                        - !Ref 'AWS::AccountId'
+                                        - ':root'
+                        Action:
+                            - 'kms:CreateGrant'
+                            - 'kms:ListGrants'
+                            - 'kms:RevokeGrant'
+                        Resource: '*'
+                        Condition:
+                            Bool:
+                                'kms:GrantIsForAWSResource': true
+
+    CreateSSHKeyRole:
+        Type: 'AWS::IAM::Role'
+        Properties:
+            AssumeRolePolicyDocument:
+                Version: 2012-10-17
+                Statement:
+                    - 
+                        Effect: Allow
+                        Principal:
+                            Service: lambda.amazonaws.com
+                        Action: 'sts:AssumeRole'
+            Path: /
+            Policies:
+                - 
+                    PolicyName: git2cp-sshkeygen
+                    PolicyDocument:
+                        Version: 2012-10-17
+                        Statement:
+                            - 
+                                Effect: Allow
+                                Action:
+                                    - 's3:GetObject'
+                                Resource:
+                                    - !Join 
+                                        - ''
+                                        - 
+                                            - 'arn:aws:s3:::'
+                                            - !Ref KeyBucket
+                                            - /crypto.zip
+                            - 
+                                Effect: Allow
+                                Action:
+                                    - 's3:PutObject'
+                                Resource:
+                                    - !Join 
+                                        - ''
+                                        - 
+                                            - 'arn:aws:s3:::'
+                                            - !Ref KeyBucket
+                                            - /enc_key
+                                    - !Join 
+                                        - ''
+                                        - 
+                                            - 'arn:aws:s3:::'
+                                            - !Ref KeyBucket
+                                            - /pub_key
+                            - 
+                                Effect: Allow
+                                Action:
+                                    - 'kms:Encrypt'
+                                Resource:
+                                    - '*'
+                            - 
+                                Effect: Allow
+                                Action:
+                                    - 'logs:CreateLogGroup'
+                                    - 'logs:CreateLogStream'
+                                    - 'logs:PutLogEvents'
+                                Resource:
+                                    - 'arn:aws:logs:*:*:*'
+
+    CreateSSHKeyLambda:
+        Type: 'AWS::Lambda::Function'
+        Properties:
+            Handler: lambda_function.lambda_handler
+            MemorySize: '128'
+            Role: !GetAtt 
+                - CreateSSHKeyRole
+                - Arn
+            Runtime: python2.7
+            Timeout: '300'
+            Code:
+                S3Bucket: !FindInMap 
+                    - LambdaBuckets
+                    - !Ref 'AWS::Region'
+                    - Name
+                S3Key: v1.0/CreateSSHKey.zip
+
+    CreateSSHKey:
+        Type: 'AWS::CloudFormation::CustomResource'
+        Version: '1.0'
+        Properties:
+            ServiceToken: !GetAtt 
+                - CreateSSHKeyLambda
+                - Arn
+            KeyBucket: !Ref KeyBucket
+            Region: !Ref 'AWS::Region'
+            KMSKey: !Ref KMSKey
+
+    GitPullCloudWatchEvent:
+        Type: 'AWS::Events::Rule'
+        Properties:
+            Description: 'Fire custom source action job worker'
+            ScheduleExpression: 'rate(5 minutes)'
+            State: 'ENABLED'
+            Targets:
+                - 
+                    Arn: !GetAtt
+                        - GitPullLambda
+                        - Arn
+                    Id: !Ref GitPullLambda
+    
+    PermissionForGitPullEvent:
+        Type: 'AWS::Lambda::Permission'
+        Properties:
+            FunctionName: !Ref GitPullLambda
+            Action: 'lambda:InvokeFunction'
+            Principal: 'events.amazonaws.com'
+            SourceArn: !GetAtt
+                - GitPullCloudWatchEvent
+                - Arn
+
+    GitPullRole:
+        Type: 'AWS::IAM::Role'
+        Properties:
+            AssumeRolePolicyDocument:
+                Version: 2012-10-17
+                Statement:
+                    - 
+                        Effect: Allow
+                        Principal:
+                            Service: lambda.amazonaws.com
+                        Action: 'sts:AssumeRole'
+            Path: /
+            Policies:
+                - 
+                    PolicyName: git2cp-gitpull
+                    PolicyDocument:
+                        Version: 2012-10-17
+                        Statement:
+                            - 
+                                Effect: Allow
+                                Action:
+                                    - 'kms:Decrypt'
+                                Resource:
+                                    - '*'
+                            - 
+                                Effect: Allow
+                                Action:
+                                    - 's3:PutObject'
+                                Resource:
+                                    - !Join 
+                                        - ''
+                                        - 
+                                            - 'arn:aws:s3:::'
+                                            - !Ref OutputBucket
+                                    - !Join 
+                                        - ''
+                                        - 
+                                            - 'arn:aws:s3:::'
+                                            - !Ref OutputBucket
+                                            - /*
+                            - 
+                                Effect: Allow
+                                Action:
+                                    - 's3:GetObject'
+                                Resource:
+                                    - !Join 
+                                        - ''
+                                        - 
+                                            - 'arn:aws:s3:::'
+                                            - !Ref KeyBucket
+                                            - /enc_key
+                                    - !Join 
+                                        - ''
+                                        - 
+                                            - 'arn:aws:s3:::'
+                                            - !Ref KeyBucket
+                                            - /pub_key
+                            - 
+                                Effect: Allow
+                                Action:
+                                    - 'logs:CreateLogGroup'
+                                    - 'logs:CreateLogStream'
+                                    - 'logs:PutLogEvents'
+                                Resource:
+                                    - '*'
+                            - 
+                                Effect: Allow
+                                Action:
+                                    - 'codepipeline:PollForJobs'
+                                    - 'codepipeline:AcknowledgeJob'
+                                    - 'codepipeline:PutJobSuccessResult'
+                                    - 'codepipeline:PutJobFailureResult'
+                                Resource:
+                                    - '*'
+                            - 
+                                Effect: Allow
+                                Action:
+                                    - 'ec2:CreateNetworkInterface'
+                                    - 'ec2:DescribeNetworkInterfaces'
+                                    - 'ec2:DeleteNetworkInterface'
+                                Resource:
+                                    - '*'
+    
+    GitPullLambda:
+        Type: 'AWS::Lambda::Function'
+        Properties:
+            Handler: lambda_function.lambda_handler
+            MemorySize: '128'
+            Role: !GetAtt 
+                - GitPullRole
+                - Arn
+            Runtime: python2.7
+            Timeout: '300'
+            Code:
+                S3Bucket: !FindInMap 
+                    - LambdaBuckets
+                    - !Ref 'AWS::Region'
+                    - Name
+                S3Key: v1.0/GitPullS3.zip
+            Environment:
+                Variables:
+                    CUSTOM_ACTION_VERSION: !FindInMap 
+                        - Constants
+                        - CustomSourceAction
+                        - SourceActionVersion
+                    CUSTOM_ACTION_PROVIDER: !FindInMap 
+                        - Constants
+                        - CustomSourceAction
+                        - SourceActionProvider
+            VpcConfig:
+                SubnetIds: [!Ref GitPullLambdaSubnet]
+                SecurityGroupIds:
+                    - !Ref GitPullSecurityGroup
+    
+    GitPullSecurityGroup:
+        Type: 'AWS::EC2::SecurityGroup'
+        Properties:
+            GroupName: 'GitPullSecurityGroup'
+            GroupDescription: 'Security group for the lambda function performing git pulls.'
+            SecurityGroupEgress:
+                - 
+                    CidrIp: '0.0.0.0/0'
+                    IpProtocol: 'tcp'
+                    FromPort: '0'
+                    ToPort: '65535'
+            VpcId: !Ref GitPullLambdaVpc
+
+    PipelineWebhook:
+        Type: "AWS::CodePipeline::Webhook"
+        Properties:
+            Name: !Ref ApplicationName
+            TargetPipeline: !Ref CodePipeline
+            TargetPipelineVersion: 1
+            TargetAction: Source
+            Filters:
+                - 
+                    JsonPath: '$.ref'
+                    MatchEquals: 'refs/heads/{Branch}'
+            Authentication: GITHUB_HMAC
+            AuthenticationConfiguration:
+                SecretToken: !Ref ApiSecret
+            RegisterWithThirdParty: false
+
 Outputs:
 
     CodePipelineURL:
         Description: The URL for the created pipeline
         Value: !Sub https://${AWS::Region}.console.aws.amazon.com/codepipeline/home?region=${AWS::Region}#/view/${ApplicationName}      
 
-    CodeDeployApplication:
-        Description: The CodeDeploy application used across all environments
-        Value: !Ref CodeDeployApplication
-        Export:
-            Name: !Sub CodeDeployApplication-${ApplicationName}
+    PublicSSHKey:
+        Value: !Ref CreateSSHKey
 
-    CodeDeployServiceRoleArn:
-        Description: The CodeDeploy service role used across all environments
-        Value: !GetAtt CodeDeployServiceRole.Arn
-        Export:
-            Name: !Sub CodeDeployServiceRoleArn-${ApplicationName}
+    GitPullWebHookApi:
+        Value: !GetAtt PipelineWebhook.Url 
 
 
